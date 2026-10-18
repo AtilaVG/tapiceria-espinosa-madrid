@@ -27,41 +27,89 @@
   var hint = intro && intro.querySelector('.scroll-hint');
   var bar2 = intro && intro.querySelector('.progress');
   var progress = 0, shown = 0, hasVideo = false;
+  var nFrames = intro ? parseInt(intro.getAttribute('data-frames') || '0', 10) : 0;
+  var frames = [], loaded = [], hasFrames = false, lastIdx = -1;
 
+  /* Medidas cacheadas (no se leen en cada fotograma) */
+  var introTop = 0, introTotal = 1, vw = 0, vh = 0;
+  function measure() {
+    if (!intro) return;
+    introTop = intro.getBoundingClientRect().top + window.scrollY;
+    introTotal = Math.max(1, intro.offsetHeight - window.innerHeight);
+  }
   function readProgress() {
-    if (!intro) return 0;
-    var r = intro.getBoundingClientRect();
-    var total = intro.offsetHeight - window.innerHeight;
-    return Math.min(1, Math.max(0, -r.top / total));
+    return Math.min(1, Math.max(0, (window.scrollY - introTop) / introTotal));
   }
 
-  if (video) {
+  /* 1) Secuencia de imágenes (fluida también en móvil) */
+  if (nFrames > 0 && canvas) {
+    var pad = function (n) { return ('00' + n).slice(-3); };
+    var load = function (i) {
+      if (frames[i]) return;
+      var img = new Image(); img.decoding = 'async';
+      img.onload = function () {
+        loaded[i] = true;
+        if (i === 0) { hasFrames = true; intro.classList.add('has-frames'); lastIdx = -1; }
+        else if (Math.abs(i - Math.round(shown * (nFrames - 1))) < 3) lastIdx = -1;
+      };
+      img.src = 'assets/frames/f' + pad(i + 1) + '.webp';
+      frames[i] = img;
+    };
+    load(0);
+    // Carga progresiva: primero uno de cada 8, luego el resto
+    var order = [];
+    for (var st = 8; st >= 1; st = st / 2 | 0) { for (var i = 0; i < nFrames; i += st) if (order.indexOf(i) < 0) order.push(i); if (st === 1) break; }
+    var qi = 0;
+    (function pump() {
+      for (var k = 0; k < 6 && qi < order.length; k++) load(order[qi++]);
+      if (qi < order.length) setTimeout(pump, 60);
+    })();
+    if (video) { video.removeAttribute('src'); video.preload = 'none'; }
+  }
+  /* 2) Vídeo, solo si no hay secuencia */
+  else if (video) {
     var ok = function () {
       if (hasVideo || !video.duration || !isFinite(video.duration)) return;
       hasVideo = true; intro.classList.add('has-video'); video.pause();
     };
     video.addEventListener('loadeddata', ok);
     video.addEventListener('loadedmetadata', ok);
-    video.addEventListener('error', function () { intro.classList.remove('has-video'); }, true);
+    if (video.dataset.src) { video.src = video.dataset.src; video.load(); }
     if (video.readyState >= 1) ok();
-    // Desbloqueo para iOS: un play/pause tras el primer toque
     window.addEventListener('touchstart', function once() {
       var p = video.play(); if (p && p.then) p.then(function () { video.pause(); }).catch(function () {});
       window.removeEventListener('touchstart', once);
     }, { passive: true });
   }
 
-  /* Escenas de respaldo (canvas) */
-  var ctx = canvas && canvas.getContext('2d');
-  var W = 0, H = 0, DPR = 1;
-  function resize() {
-    if (!canvas) return;
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = canvas.clientWidth; H = canvas.clientHeight;
-    canvas.width = W * DPR; canvas.height = H * DPR;
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  function drawFrame(idx) {
+    var j = idx, d = 0;
+    while (!loaded[j] && d < nFrames) { d++; if (loaded[idx - d]) { j = idx - d; break; } if (loaded[idx + d]) { j = idx + d; break; } }
+    var img = frames[j]; if (!img || !loaded[j]) return;
+    var iw = img.naturalWidth, ih = img.naturalHeight, sc = Math.max(W / iw, H / ih);
+    var dw = iw * sc, dh = ih * sc;
+    ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
   }
-  window.addEventListener('resize', resize); resize();
+
+  /* Canvas */
+  var ctx = canvas && canvas.getContext('2d', { alpha: false });
+  var W = 0, H = 0, DPR = 1;
+  function resize(force) {
+    measure();
+    if (!canvas) return;
+    var nw = canvas.clientWidth, nh = canvas.clientHeight;
+    // En móvil la barra del navegador cambia la altura al hacer scroll: ignorar cambios pequeños
+    if (!force && nw === vw && Math.abs(nh - vh) < 140) return;
+    vw = nw; vh = nh;
+    DPR = Math.min(window.devicePixelRatio || 1, nFrames ? 1.5 : (nw < 760 ? 1.5 : 2));
+    W = nw; H = nh;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    lastIdx = -1;
+  }
+  window.addEventListener('resize', function () { resize(false); });
+  window.addEventListener('load', function () { resize(true); });
+  resize(true);
 
   function ease(x) { return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; }
   function seg(p, a, b) { return Math.min(1, Math.max(0, (p - a) / (b - a))); }
@@ -212,28 +260,141 @@
       ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
     }
   };
+  /* Taberna: puertas de madera que se abren → barra de mármol → raciones con vapor */
+  SCENES.taberna = function (p, t) {
+    var cx = W / 2, cy = H / 2;
+    ctx.fillStyle = '#0f1d17'; ctx.fillRect(0, 0, W, H);
+    var zoom = 1 + ease(seg(p, 0, .5)) * .9;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(zoom, zoom); ctx.translate(-cx, -cy);
+    var dw = Math.min(W * .5, 520), dh = Math.min(H * .78, 620), dx = cx - dw / 2, dy = cy - dh / 2 + 30;
+    // fachada verde con molduras
+    ctx.fillStyle = '#1d3a2c'; ctx.fillRect(dx - 80, dy - 90, dw + 160, dh + 120);
+    ctx.strokeStyle = 'rgba(214,179,106,.55)'; ctx.lineWidth = 3; ctx.strokeRect(dx - 64, dy - 74, dw + 128, dh + 88);
+    ctx.fillStyle = '#d6b36a'; ctx.fillRect(dx - 64, dy - 74, dw + 128, 36);
+    // interior iluminado
+    var ig = ctx.createLinearGradient(0, dy, 0, dy + dh);
+    ig.addColorStop(0, '#f2c27a'); ig.addColorStop(.6, '#b06a2c'); ig.addColorStop(1, '#4a2611');
+    ctx.fillStyle = ig; ctx.fillRect(dx, dy, dw, dh);
+    // barra de mármol y raciones
+    var by = dy + dh * .62;
+    ctx.fillStyle = '#e9e4da'; ctx.fillRect(dx, by, dw, 18);
+    ctx.fillStyle = '#5a3418'; ctx.fillRect(dx, by + 18, dw, dh * .38 - 18);
+    var plates = ease(seg(p, .5, .85));
+    for (var i = 0; i < 4; i++) {
+      var a = Math.min(1, Math.max(0, plates * 4 - i));
+      if (a <= 0) continue;
+      var px = dx + dw * (.16 + i * .23), py = by + 4;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = '#fbf8f2'; ctx.beginPath(); ctx.ellipse(px, py, 34, 9, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = i % 2 ? '#c98a3a' : '#e0b06a';
+      for (var k = 0; k < 3; k++) { ctx.beginPath(); ctx.ellipse(px - 14 + k * 14, py - 6, 8, 6, 0, 0, Math.PI * 2); ctx.fill(); }
+      ctx.strokeStyle = 'rgba(255,255,255,' + (.25 * a) + ')'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(px, py - 14);
+      for (var s = 1; s < 6; s++) ctx.lineTo(px + Math.sin(t * 2 + s + i) * 5, py - 14 - s * 9);
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+    // hojas de la puerta que se abren
+    var open = ease(seg(p, .05, .45));
+    for (var side = 0; side < 2; side++) {
+      var w = dw / 2 * (1 - open * .92);
+      var x = side ? dx + dw - w : dx;
+      var dg = ctx.createLinearGradient(x, 0, x + w, 0);
+      dg.addColorStop(0, '#3b2414'); dg.addColorStop(1, '#5a3a20');
+      ctx.fillStyle = dg; ctx.fillRect(x, dy, w, dh);
+      ctx.strokeStyle = 'rgba(214,179,106,.4)'; ctx.lineWidth = 2;
+      if (w > 30) { ctx.strokeRect(x + w * .15, dy + dh * .08, w * .7, dh * .38); ctx.strokeRect(x + w * .15, dy + dh * .52, w * .7, dh * .38); }
+    }
+    ctx.restore();
+    var lg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * .7);
+    lg.addColorStop(0, 'rgba(255,190,110,' + (.05 + open * .15) + ')'); lg.addColorStop(1, 'rgba(0,0,0,.5)');
+    ctx.fillStyle = lg; ctx.fillRect(0, 0, W, H);
+  };
+
+  /* Asador: horno de leña que se enciende → brasas → cazuela de barro */
+  SCENES.asador = function (p, t) {
+    var cx = W / 2, cy = H / 2;
+    ctx.fillStyle = '#140c08'; ctx.fillRect(0, 0, W, H);
+    var zoom = 1.5 - ease(p) * .45;
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(zoom, zoom); ctx.translate(-cx, -cy);
+    var R = Math.min(W * .32, H * .42, 330), oy = cy + R * .35;
+    // ladrillos
+    for (var row = 0; row < 14; row++) for (var col = -10; col < 10; col++) {
+      var bx = cx + col * 62 + (row % 2) * 31, byy = oy - R * 1.6 + row * 28;
+      ctx.fillStyle = 'rgba(' + (110 + (row * 7 + col * 13) % 30) + ',52,30,1)';
+      ctx.fillRect(bx, byy, 58, 24);
+    }
+    // boca del horno
+    ctx.fillStyle = '#060302'; ctx.beginPath(); ctx.arc(cx, oy, R, Math.PI, 0); ctx.lineTo(cx + R, oy + 6); ctx.lineTo(cx - R, oy + 6); ctx.fill();
+    var fire = ease(seg(p, .08, .55));
+    var fg = ctx.createRadialGradient(cx, oy, 5, cx, oy, R);
+    fg.addColorStop(0, 'rgba(255,170,60,' + fire + ')'); fg.addColorStop(.5, 'rgba(200,70,20,' + fire * .6 + ')'); fg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = fg; ctx.beginPath(); ctx.arc(cx, oy, R, Math.PI, 0); ctx.fill();
+    // llamas
+    for (var f = 0; f < 9; f++) {
+      var fx = cx - R * .7 + f * R * .175, fh = R * (.25 + .35 * fire) * (.7 + .3 * Math.sin(t * 5 + f * 1.7));
+      ctx.fillStyle = 'rgba(255,' + (140 + f * 10) + ',40,' + (.55 * fire) + ')';
+      ctx.beginPath(); ctx.moveTo(fx - 18, oy); ctx.quadraticCurveTo(fx - 10 + Math.sin(t * 4 + f) * 8, oy - fh * .6, fx, oy - fh);
+      ctx.quadraticCurveTo(fx + 12, oy - fh * .5, fx + 18, oy); ctx.fill();
+    }
+    // brasas
+    for (var e = 0; e < 70; e++) {
+      var life = (t * .35 + e * .137) % 1;
+      var ex = cx + Math.sin(e * 12.9) * R * .8 + Math.sin(t + e) * 10, ey = oy - life * R * 1.8;
+      ctx.fillStyle = 'rgba(255,' + (120 + e % 80) + ',40,' + ((1 - life) * fire) + ')';
+      ctx.fillRect(ex, ey, 2.2, 2.2);
+    }
+    // cazuela de barro con asado
+    var dish = ease(seg(p, .55, .9));
+    if (dish > 0) {
+      var dy2 = oy + 60 + (1 - dish) * 200;
+      ctx.globalAlpha = dish;
+      ctx.fillStyle = '#7a3a1a'; ctx.beginPath(); ctx.ellipse(cx, dy2, R * .62, R * .17, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#a24f22'; ctx.beginPath(); ctx.ellipse(cx, dy2 - 8, R * .56, R * .13, 0, 0, Math.PI * 2); ctx.fill();
+      var rg = ctx.createRadialGradient(cx - 20, dy2 - 30, 5, cx, dy2 - 14, R * .4);
+      rg.addColorStop(0, '#f0b45c'); rg.addColorStop(1, '#8a4a16');
+      ctx.fillStyle = rg; ctx.beginPath(); ctx.ellipse(cx, dy2 - 18, R * .38, R * .1, 0, Math.PI, 0); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,.18)'; ctx.lineWidth = 2;
+      for (var v = 0; v < 3; v++) { ctx.beginPath(); ctx.moveTo(cx - 40 + v * 40, dy2 - 34);
+        for (var s2 = 1; s2 < 7; s2++) ctx.lineTo(cx - 40 + v * 40 + Math.sin(t * 2 + s2 + v) * 6, dy2 - 34 - s2 * 12); ctx.stroke(); }
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+    var vg = ctx.createRadialGradient(cx, cy, Math.min(W, H) * .3, cx, cy, Math.max(W, H) * .75);
+    vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.6)');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  };
+
   var scene = SCENES[document.body.getAttribute('data-scene')] || SCENES.carpintero;
   if (ctx && !ctx.roundRect) { CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h) { this.rect(x, y, w, h); }; }
 
-  /* Bucle principal */
-  var start = performance.now();
+  /* Bucle principal: solo toca el DOM cuando algo cambia */
+  var start = performance.now(), lastPhase = -1, lastSolid = null, lastHint = null, lastBar = -1;
   function frame(now) {
     progress = readProgress();
-    shown += (progress - shown) * (reduce ? 1 : .12);
+    var diff = progress - shown;
+    shown = Math.abs(diff) < 0.0005 ? progress : shown + diff * (reduce ? 1 : .18);
     var t = (now - start) / 1000;
-    if (hasVideo) {
-      var target = shown * (video.duration - 0.05);
-      if (Math.abs(video.currentTime - target) > 0.02) { try { video.currentTime = target; } catch (e) {} }
-    } else if (ctx && intro.getBoundingClientRect().bottom > 0) {
-      scene(shown, reduce ? 0 : t);
+    var visible = window.scrollY < introTop + introTotal + window.innerHeight;
+    if (visible && ctx) {
+      if (hasFrames) {
+        var idx = Math.round(shown * (nFrames - 1));
+        if (idx !== lastIdx) { drawFrame(idx); lastIdx = idx; }
+      } else if (hasVideo) {
+        var target = shown * (video.duration - 0.05);
+        if (Math.abs(video.currentTime - target) > 0.04 && !video.seeking) { try { video.currentTime = target; } catch (e) {} }
+      } else if (!nFrames || !loaded[0]) {
+        scene(shown, reduce ? 0 : t);
+      }
     }
-    phases.forEach(function (ph) {
-      var a = parseFloat(ph.dataset.from), b = parseFloat(ph.dataset.to);
-      ph.classList.toggle('on', shown >= a && shown < b);
-    });
-    if (hint) hint.style.opacity = shown > .04 ? 0 : .8;
-    if (bar2) bar2.style.width = (shown * 100) + '%';
-    if (head) head.classList.toggle('solid', !intro || intro.getBoundingClientRect().bottom < 90);
+    var ph = -1;
+    phases.forEach(function (el, i) { if (shown >= parseFloat(el.dataset.from) && shown < parseFloat(el.dataset.to)) ph = i; });
+    if (ph !== lastPhase) { phases.forEach(function (el, i) { el.classList.toggle('on', i === ph); }); lastPhase = ph; }
+    var hv = shown > .04;
+    if (hint && hv !== lastHint) { hint.style.opacity = hv ? 0 : .8; lastHint = hv; }
+    var bw = Math.round(shown * 1000) / 10;
+    if (bar2 && bw !== lastBar) { bar2.style.transform = 'scaleX(' + (bw / 100) + ')'; lastBar = bw; }
+    var solid = !intro || window.scrollY > introTop + introTotal + window.innerHeight - 90;
+    if (head && solid !== lastSolid) { head.classList.toggle('solid', solid); lastSolid = solid; }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
